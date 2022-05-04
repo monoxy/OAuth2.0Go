@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -21,7 +22,7 @@ func RandString(n int) string {
 func Post(url, data string, header map[string]string) ([]byte, error) {
 	req, _ := http.NewRequest("POST", url, strings.NewReader(data))
 	for k, v := range header {
-		req.Header.Set(k, v)
+		req.Header.Add(k, v)
 	}
 	client := &http.Client{}
 	rsp, err := client.Do(req)
@@ -35,4 +36,19 @@ func Post(url, data string, header map[string]string) ([]byte, error) {
 		return nil, err
 	}
 	return body, nil
+}
+
+func DecodeAuth(auth string) (string, string) {
+	var clientID, clientSecret string
+	if strings.HasPrefix(auth, "Basic ") {
+		s := auth[len("basic "):]
+		list := strings.Split(s, ":")
+		if len(list) > 1 {
+			var secretBase64 string
+			clientID, secretBase64 = list[0], list[1]
+			b, _ := base64.StdEncoding.DecodeString(secretBase64)
+			clientSecret = string(b)
+		}
+	}
+	return clientID, clientSecret
 }

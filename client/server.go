@@ -34,7 +34,7 @@ var client = &model.Client{
 	ClientID:     "oauth-client-1",
 	ClientSecret: "oauth-client-secret-1",
 	RedirectURIs: []string{"http://localhost:9000/callback"},
-	Scope:        "",
+	Scope:        "foo bar",
 }
 
 func Start() {
@@ -71,7 +71,7 @@ func authorize(c *gin.Context) {
 
 func callback(c *gin.Context) {
 	error := c.Query("error")
-	if len(error) > 0 {
+	if error != "" {
 		c.HTML(http.StatusOK, "error.html", gin.H{"error": error})
 		return
 	}
@@ -87,13 +87,14 @@ func callback(c *gin.Context) {
 	formData.Set("grant_type", "authorization_code")
 	formData.Set("code", code)
 	formData.Set("redirect_uri", client.RedirectURIs[0])
-	header := map[string]string{
+	headers := map[string]string{
 		"Content-Type": "application/x-www-form-urlencoded",
 		"Authorization": fmt.Sprintf("Basic %s:%s",
 			url.QueryEscape(client.ClientID),
 			base64.StdEncoding.EncodeToString([]byte(client.ClientSecret))),
 	}
-	body, err := utils.Post(authServer.TokenEndpoint, formData.Encode(), header)
+	body, err := utils.Post(authServer.TokenEndpoint, formData.Encode(), headers)
+	logrus.Info("endpoint: ", authServer.TokenEndpoint, ", body: ", string(body))
 	if err != nil {
 		c.HTML(http.StatusOK, "error.html", gin.H{"error": err.Error()})
 		return
@@ -119,15 +120,15 @@ func callback(c *gin.Context) {
 
 func fetchResource(c *gin.Context) {
 	logrus.Info("Making request with access_token: ", accessToken)
-	header := map[string]string{
+	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", accessToken),
 		"Content-Type":  "application/x-www-form-urlencoded",
 	}
-	body, err := utils.Post(protectedResource, "", header)
+	body, err := utils.Post(protectedResource, "", headers)
 	if err != nil {
 		accessToken = "null"
 		c.HTML(http.StatusOK, "error.html", gin.H{"error": err.Error()})
 		return
 	}
-	c.HTML(http.StatusOK, "data.html", gin.H{"data": string(body)})
+	c.HTML(http.StatusOK, "data.html", gin.H{"resource": string(body)})
 }

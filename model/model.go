@@ -1,12 +1,9 @@
 package model
 
-import (
-	"github.com/gin-gonic/gin"
-)
-
 type Client struct {
 	ClientID     string
 	ClientSecret string
+	ClientName   string
 	RedirectURIs []string
 	Scope        string
 }
@@ -17,7 +14,7 @@ type AuthSever struct {
 }
 
 type CodeInfo struct {
-	AuthorizationEndpointRequest *gin.Context
+	AuthorizationEndpointRequest *ClientQuery
 	Scopes                       []string
 	User                         string
 }

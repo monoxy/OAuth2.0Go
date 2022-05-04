@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 
 	"oauth2.0go/db"
 	"oauth2.0go/model"
@@ -39,8 +40,8 @@ var getClient = func(clientID string) *model.Client {
 	return nil
 }
 
-var requests = map[string]*gin.Context{} // 记录客户端请求
-var mutex sync.RWMutex
+var requests = map[string]*model.ClientQuery{} // 记录客户端请求
+var mutex sync.Mutex
 
 func Start() {
 	r := gin.Default()
@@ -54,8 +55,8 @@ func Start() {
 	})
 
 	r.GET("/authorize", authorize)
-	r.GET("/approve", approve)
-	r.GET("/token", token)
+	r.POST("/approve", approve)
+	r.POST("/token", token)
 	go r.Run(":9001")
 }
 
@@ -68,7 +69,7 @@ func authorize(c *gin.Context) {
 			"error": "Unknown client",
 		})
 		return
-	} else if !contain(redirectURL, client.RedirectURIs) {
+	} else if !contain(client.RedirectURIs, redirectURL) {
 		c.HTML(http.StatusOK, "error.html", gin.H{
 			"error": "Invalid redirect URI",
 		})
@@ -82,15 +83,18 @@ func authorize(c *gin.Context) {
 	}
 	cscope = strings.Split(client.Scope, " ")
 	if !checkScope(rscope, cscope) {
-		redirect(c, map[string]string{"error": "invalid_scope"})
+		redirect(c, redirectURL, map[string]string{"error": "invalid_scope"})
 		return
 	}
 
 	// 保存客户端请求
 	var reqID = utils.RandString(8)
+	clientQuery := model.NewClientQuery(c.Request.URL.Query())
 	mutex.Lock()
-	requests[reqID] = c
+	requests[reqID] = clientQuery
 	mutex.Unlock()
+	logrus.Info("requests len: ", len(requests))
+	logrus.Info("save request url: ", clientQuery.Vals, ", reqId: ", reqID)
 	c.HTML(http.StatusOK, "approve.html", gin.H{
 		"client": client,
 		"reqid":  reqID,
@@ -100,21 +104,24 @@ func authorize(c *gin.Context) {
 
 func approve(c *gin.Context) {
 	reqID := c.PostForm("reqid")
-	mutex.RLock()
-	query := requests[reqID]
+	mutex.Lock()
+	clientQuery := requests[reqID]
 	delete(requests, reqID) // 使用后要删除reqID对应的request信息
-	mutex.RUnlock()
-	if query == nil {
+	mutex.Unlock()
+	if clientQuery == nil {
 		c.HTML(http.StatusOK, "error.html", gin.H{
 			"error": "No matching authorization request",
 		})
 		return
 	}
 
+	logrus.Info("get request url: ", clientQuery.Vals, ", reqId: ", reqID)
+	redirectURL := clientQuery.Get("redirect_uri") // 上次请求中保存的重定向url
+
 	approve := c.PostForm("approve")
-	if len(approve) > 0 {
+	if approve != "" {
 		// 如果是授权码模式，则生成8字符的授权码
-		if query.Query("response_type") == "code" {
+		if clientQuery.Get("response_type") == "code" {
 			code := utils.RandString(8)
 			user := c.PostForm("user")
 			var getScopes = func(ctx *gin.Context) []string {
@@ -128,40 +135,43 @@ func approve(c *gin.Context) {
 				return cscope
 			}
 			rscope := getScopes(c)
-			client := getClient(query.Query("client_id"))
+			client := getClient(clientQuery.Get("client_id"))
 			cscope := strings.Split(client.Scope, " ")
 			if !checkScope(rscope, cscope) {
-				redirect(c, map[string]string{"error": "invalid_scope"})
+				redirect(c, redirectURL, map[string]string{"error": "invalid_scope"})
 				return
 			}
 
 			// 将code保存起来，以待后续校验用
 			codeMutex.Lock()
 			codes[code] = &model.CodeInfo{
-				AuthorizationEndpointRequest: c,
+				AuthorizationEndpointRequest: clientQuery,
 				Scopes:                       rscope,
 				User:                         user,
 			}
+			logrus.Info("save code: ", codes[code])
 			codeMutex.Unlock()
-			redirect(c, map[string]string{"code": code, "state": query.Query("state")})
+			redirect(c, redirectURL, map[string]string{"code": code, "state": clientQuery.Get("state")})
 			return
 		} else {
 			// 非授权码类型暂时不支持
-			redirect(c, map[string]string{"error": "unsupported_response_type"})
+			redirect(c, redirectURL, map[string]string{"error": "unsupported_response_type"})
 			return
 		}
 	} else {
-		redirect(c, map[string]string{"error": "invalid_scope"})
+		redirect(c, redirectURL, map[string]string{"error": "invalid_scope"})
 		return
 	}
 }
 
 func token(c *gin.Context) {
 	var auth = c.GetHeader("authorization")
+	logrus.Info("auth: ", auth)
 	var clientID, clientSecret string
 	if len(auth) > 0 {
-		clientID, clientSecret = decodeAuth(auth)
+		clientID, clientSecret = utils.DecodeAuth(auth)
 	}
+	logrus.Info("clientID: ", clientID, ", clientSecret: ", clientSecret)
 
 	// 如果header中传递了auth，但同时body也传递clientId，则是不合规范的
 	if len(c.PostForm("client_id")) > 0 {
@@ -192,7 +202,7 @@ func token(c *gin.Context) {
 			codeMutex.Lock()
 			delete(codes, c.PostForm("code"))
 			codeMutex.Unlock()
-			if code.AuthorizationEndpointRequest.Query("client_id") == clientID {
+			if code.AuthorizationEndpointRequest.Get("client_id") == clientID {
 				accessToken := utils.RandString(8)
 				cscope := strings.Join(code.Scopes, " ")
 				db.Insert(map[string]interface{}{"access_token": accessToken, "client_id": clientID, "scope": cscope})
@@ -204,10 +214,12 @@ func token(c *gin.Context) {
 				}
 				c.JSON(200, tokenResponse)
 			} else {
+				logrus.Error("clientId not found")
 				c.JSON(400, map[string]string{"error": "invalid_grant"})
 				return
 			}
 		} else {
+			logrus.Error("code not found")
 			c.JSON(400, map[string]string{"error": "invalid_grant"})
 			return
 		}
@@ -217,7 +229,7 @@ func token(c *gin.Context) {
 	}
 }
 
-func contain(s string, list []string) bool {
+func contain(list []string, s string) bool {
 	for _, v := range list {
 		if s == v {
 			return true
@@ -228,15 +240,15 @@ func contain(s string, list []string) bool {
 
 func checkScope(reqScopes, clientScopes []string) bool {
 	for _, v := range reqScopes {
-		if !contain(v, clientScopes) {
+		if !contain(clientScopes, v) {
 			return false
 		}
 	}
 	return true
 }
 
-func redirect(c *gin.Context, appendKV map[string]string) {
-	urlParse, _ := url.Parse(c.Query("redirect_uri"))
+func redirect(c *gin.Context, redirectURL string, appendKV map[string]string) {
+	urlParse, _ := url.Parse(redirectURL)
 	vals := urlParse.Query()
 	// 在重定向url附加参数
 	for k, v := range appendKV {
@@ -246,13 +258,3 @@ func redirect(c *gin.Context, appendKV map[string]string) {
 	c.Redirect(302, urlParse.String())
 }
 
-func decodeAuth(auth string) (clientID, clientSecret string) {
-	if strings.HasPrefix(auth, "basic ") {
-		s := auth[len("basic "):]
-		list := strings.Split(s, ":")
-		if len(list) > 2 {
-			clientID, clientSecret = list[0], list[1]
-		}
-	}
-	return
-}
