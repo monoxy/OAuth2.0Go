@@ -41,7 +41,7 @@ func Post(url, data string, header map[string]string) ([]byte, error) {
 func DecodeAuth(auth string) (string, string) {
 	var clientID, clientSecret string
 	if strings.HasPrefix(auth, "Basic ") {
-		s := auth[len("basic "):]
+		s := auth[len("Basic "):]
 		list := strings.Split(s, ":")
 		if len(list) > 1 {
 			var secretBase64 string
